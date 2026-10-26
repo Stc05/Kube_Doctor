@@ -1,0 +1,16 @@
+# Secrets
+.env
+*.env
+
+# Terraform : état et variables, qui peuvent contenir des secrets
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+
+# Accès aux clusters
+kubeconfig
+*.kubeconfig
+
+# macOS
+.DS_Store
