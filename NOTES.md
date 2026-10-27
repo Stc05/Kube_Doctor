@@ -61,3 +61,104 @@
 
 ### Helm
 - `helm version --short` : vérifier que Helm est installé
+
+## Jour 3 : Azure, Terraform et AKS
+
+### Installer les outils et se connecter
+- `brew install azure-cli` : installer la commande `az`
+- `brew tap hashicorp/tap` : ajouter le catalogue officiel de HashiCorp à Homebrew
+- `brew install hashicorp/tap/terraform` : installer Terraform depuis ce catalogue
+- `az login` : se connecter à Azure (choisir l'abonnement Azure for Students)
+- `az account show --output table` : vérifier l'abonnement actif
+- `az account set --subscription "Azure for Students"` : changer d'abonnement actif
+- `az account show --query id --output tsv` : afficher l'identifiant de l'abonnement
+
+### Activer les fournisseurs de ressources (une fois par abonnement)
+- `az provider register --namespace Microsoft.Compute` : machines virtuelles (nœuds)
+- `az provider register --namespace Microsoft.ContainerService` : AKS
+- `az provider register --namespace Microsoft.ContainerRegistry` : registre d'images
+- `az provider register --namespace Microsoft.Network` : réseau, répartiteur de charge
+- `az provider show --namespace <nom> --output table` : vérifier l'état (Registered)
+- `az provider list --output table | grep -i container` : retrouver des noms de fournisseurs
+
+### Vérifier quotas, tailles et régions
+- `az vm list-usage --location <région> --output table` : quotas de vCPU par famille
+- `az vm list-usage --location <région> --output table | grep -v " 0$"` : seulement les quotas non nuls
+- `az vm list-skus --location <région> --size <taille> --output table` : taille accessible ? (vide = interdite)
+- `az vm list-skus --location <région> --size <taille> --all --output table` : voir la raison d'un blocage
+- `az vm list-skus --location <région> --resource-type virtualMachines --output table | grep -E "_B2|_D2"` : petites tailles disponibles
+- `az policy assignment list --output table` : règles imposées à l'abonnement
+- `az policy assignment show --name sys.regionrestriction --query parameters --output json` : régions autorisées
+- `az aks get-versions --location <région> --output table` : versions AKS proposées (garder celles en KubernetesOfficial)
+- Règle : une taille est utilisable si la région est autorisée, si elle est disponible (restriction None ou seulement Zone) et si sa famille a du quota
+
+### Terraform
+- `terraform version` : vérifier l'installation
+- `terraform init` : télécharger le provider (première fois, ou après changement de provider)
+- `terraform fmt` : mettre les fichiers en forme
+- `terraform validate` : vérifier le code, sans contacter Azure
+- `terraform plan` : voir ce qui serait créé, modifié ou supprimé, sans rien faire
+- `terraform apply` : appliquer (lire la ligne "X to add, Y to change, Z to destroy" avant de taper yes)
+- `terraform destroy` : tout supprimer en fin de session
+- `terraform state list` : voir les ressources gérées par Terraform
+
+### Utiliser le cluster AKS
+- `az aks get-credentials --resource-group rg-kube-doctor --name aks-kube-doctor --overwrite-existing` : connecter kubectl à AKS
+- `az aks list --output table` : lister les clusters AKS
+- `az group show --name rg-kube-doctor` : vérifier un groupe de ressources
+- `az group list --output table` : lister les groupes de ressources
+- `kubectl get service frontend-external -w` : attendre l'adresse IP publique de la boutique
+
+### Routine quotidienne sur AKS
+- `cd ~/projets/Kube_Doctor/terraform` puis `terraform apply`
+- `az aks get-credentials --resource-group rg-kube-doctor --name aks-kube-doctor --overwrite-existing`
+- travailler
+- `terraform destroy` puis `kubectl config use-context k3d-kube-doctor`
+
+## Jour 2 : Helm, Prometheus et Grafana (en local)
+
+### Cluster local et contextes
+- `k3d cluster start kube-doctor` : rallumer le cluster local
+- `k3d cluster list` : lister les clusters k3d
+- `kubectl config use-context k3d-kube-doctor` : basculer sur le cluster local
+- `kubectl config get-contexts` : lister les contextes (étoile = actif)
+- `kubectl get namespaces` : lister les namespaces
+- `kubectl get pods -A` : les pods de tous les namespaces
+- `kubectl api-resources` : types d'objets et leurs abréviations (svc, deploy, ns…)
+
+### Explorer un chart
+- `ls ~/projets/microservices-demo/helm-chart` : Chart.yaml, values.yaml, templates/
+- `grep -n -A 12 "cartService:" values.yaml` : trouver un réglage dans les valeurs par défaut
+- `grep -rn "cartService.resources" templates/` : voir où le réglage est utilisé
+- `helm show values <chart>` : toutes les valeurs par défaut d'un chart
+- `helm show chart <chart>` : la carte d'identité d'un chart (dont ses dépendances)
+- `helm template <release> <chart> -f <fichier>` : afficher le YAML final sans rien installer
+
+### Installer la boutique avec Helm
+- `kubectl delete -f ~/projets/microservices-demo/release/kubernetes-manifests.yaml` : retirer l'installation kubectl du jour 1
+- `helm install boutique ~/projets/microservices-demo/helm-chart -f ~/projets/Kube_Doctor/helm/boutique-values.yaml` : installer avec mes réglages
+- `helm list` : voir les releases
+- `kubectl get deployment cartservice -o jsonpath='{.spec.template.spec.containers[0].resources}'` : vérifier les ressources appliquées
+
+### Installer le monitoring
+- `helm repo add prometheus-community https://prometheus-community.github.io/helm-charts` : ajouter le dépôt de charts
+- `helm repo update` : mettre à jour la liste des charts
+- `helm search repo kube-prometheus-stack` : trouver le chart et sa version
+- `helm install monitoring prometheus-community/kube-prometheus-stack --version 92.14.0 --namespace monitoring --create-namespace` : installer Prometheus, Grafana, Alertmanager
+- `kubectl get pods -n monitoring -w` : suivre le démarrage
+
+### Accéder à Grafana
+- `kubectl get secrets -n monitoring` : lister les Secrets
+- `kubectl get secret -n monitoring monitoring-grafana -o jsonpath="{.data.admin-password}" | base64 -d; echo` : mot de passe admin
+- `kubectl get svc -n monitoring` : Services et ports
+- `kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80` : ouvrir http://localhost:3000 (identifiant admin)
+
+### Premières requêtes PromQL (Grafana, menu Explore)
+- `container_memory_working_set_bytes{namespace="default", container="server", pod=~"cartservice.*"} / 1024 / 1024` : mémoire réelle de cartservice en MiB
+- `kube_pod_container_resource_limits{namespace="default", pod=~"cartservice.*", resource="memory"} / 1024 / 1024` : sa limite en MiB
+
+### Diagnostic cartservice : les preuves
+- En local, limite 128 MiB : 18 redémarrages (OOMKilled)
+- Sur AKS, limite 128 MiB : 0 redémarrage
+- En local, consommation mesurée par Prometheus : environ 142 MiB, au-dessus de 128
+- Conclusion : l'émulation amd64 sur Mac arm64 augmente la consommation ; limite fixée à 256 MiB dans helm/boutique-values.yaml
