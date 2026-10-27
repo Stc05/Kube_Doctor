@@ -1,0 +1,11 @@
+# Réglages propres à Kube Doctor, superposés aux valeurs par défaut du chart.
+# cartservice : limite mémoire fixée explicitement, car 128 Mi provoquait
+# des OOMKilled en local (émulation amd64 sur Mac arm64).
+cartService:
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
