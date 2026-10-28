@@ -162,3 +162,58 @@
 - Sur AKS, limite 128 MiB : 0 redémarrage
 - En local, consommation mesurée par Prometheus : environ 142 MiB, au-dessus de 128
 - Conclusion : l'émulation amd64 sur Mac arm64 augmente la consommation ; limite fixée à 256 MiB dans helm/boutique-values.yaml
+
+## Jour 4 : registre d'images, Key Vault et permissions
+
+### Préparer Azure
+- `az account show --output table` : vérifier l'abonnement actif (Azure for Students)
+- `az provider register --namespace Microsoft.KeyVault` : activer le service Key Vault (une fois par abonnement)
+- `az provider show --namespace Microsoft.KeyVault --output table` : vérifier l'état (Registered)
+- `az acr check-name --name acrkubedoctorstc05` : vérifier qu'un nom de registre est libre (unique dans tout Azure, minuscules et chiffres)
+
+### Écrire et vérifier le Terraform
+- `nano providers.tf` : bloc `features { key_vault { purge_soft_delete_on_destroy = true … } }` pour purger le coffre au destroy
+- `nano main.tf` : ajouter le registre, l'accès AcrPull, le Key Vault et la permission
+- `cat >> main.tf << 'EOF' … EOF` : ajouter des blocs à la fin d'un fichier sans rien effacer
+- `grep -n '^resource\|^data' main.tf` : lister les blocs déclarés dans le fichier
+- `terraform fmt` : mettre en forme
+- `terraform validate` : vérifier le code
+- `terraform plan` : vérifier la dernière ligne avant d'appliquer
+- `terraform apply` : créer ou modifier (lire add / change / destroy avant de taper yes)
+- `terraform state list` : voir les ressources réellement gérées par Terraform
+
+### Tester le coffre
+- `az keyvault secret set --vault-name kv-kubedoctor-stc05 --name test-secret --value "bonjour"` : ranger un secret (vault-name = le coffre, name = le secret)
+- `az keyvault secret show --vault-name kv-kubedoctor-stc05 --name test-secret --query value --output tsv` : relire sa valeur
+- `az keyvault list-deleted --output table` : voir les coffres supprimés mais encore en réserve
+
+### Tester l'accès du cluster au registre
+- `az aks get-credentials --resource-group rg-kube-doctor --name aks-kube-doctor --overwrite-existing` : connecter kubectl (Mac vers cluster)
+- `az aks check-acr --resource-group rg-kube-doctor --name aks-kube-doctor --acr acrkubedoctorstc05.azurecr.io` : diagnostic cluster vers registre
+
+### Terminer la session
+- `terraform destroy` : tout supprimer (6 to destroy ; le bloc data n'est pas compté)
+- `az group list --output table` : ne doit rester que NetworkWatcherRG (créé automatiquement par Azure)
+- `kubectl config use-context k3d-kube-doctor` : revenir sur le cluster local
+
+### Reste à faire (prochaine session)
+- `terraform apply` puis `az aks get-credentials … --overwrite-existing`
+- `helm install boutique ~/projets/microservices-demo/helm-chart -f ~/projets/Kube_Doctor/helm/boutique-values.yaml`
+- `kubectl get service frontend-external -w` : attendre l'adresse IP publique
+- optionnel : `helm install monitoring prometheus-community/kube-prometheus-stack --version 92.14.0 --namespace monitoring --create-namespace`
+- `terraform destroy`
+
+### Notions du jour
+- Attribution de rôle (RBAC Azure) : qui (une identité), quel rôle, sur quoi (la portée)
+- Moindre privilège : AcrPull pour le cluster (lire seulement), Key Vault Secrets Officer pour moi, chacun limité à une seule ressource
+- Kubelet identity : l'identité des nœuds, celle qui télécharge les images (différente de l'identité du cluster)
+- Bloc `data` : lire une information existante sans rien créer (ici mon identité et mon tenant)
+- Tenant : l'annuaire d'identités de l'organisation (DVHE pour l'école)
+- Key Vault : coffre à secrets ; suppression réversible 7 jours, purge activée pour le destroy quotidien
+- ClusterIP vs LoadBalancer : Grafana reste interne (accès par port-forward), seule la boutique a une adresse publique
+
+### Incident du jour
+- Un apply a annoncé "0 added, 1 changed" au lieu de "3 to add" : les nouveaux blocs n'étaient pas enregistrés dans main.tf
+- Diagnostic : `terraform state list` (3 ressources seulement) puis `grep` sur main.tf
+- Le "1 changed" sur le cluster était une dérive : Azure remplit des réglages par défaut après la création
+- Leçon : toujours lire la dernière ligne du plan avant de taper yes
