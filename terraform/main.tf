@@ -10,6 +10,12 @@ resource "azurerm_kubernetes_cluster" "main" {
   dns_prefix          = "kubedoctor"
   kubernetes_version  = var.kubernetes_version
 
+  role_based_access_control_enabled = true
+
+  api_server_access_profile {
+    authorized_ip_ranges = [var.authorized_ip]
+  }
+
   default_node_pool {
     name       = "system"
     node_count = var.node_count

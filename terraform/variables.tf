@@ -26,3 +26,8 @@ variable "node_vm_size" {
   type        = string
   default     = "Standard_B2s_v2"
 }
+
+variable "authorized_ip" {
+  description = "Adresse IP publique autorisée à joindre l'API du cluster (au format x.x.x.x/32)"
+  type        = string
+}
