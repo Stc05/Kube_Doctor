@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: boutique
+  namespace: argocd
+spec:
+  project: default
+
+  sources:
+    # 1. Le chart de Google, à une version figée
+    - repoURL: https://github.com/GoogleCloudPlatform/microservices-demo.git
+      targetRevision: v0.10.7
+      path: helm-chart
+      helm:
+        valueFiles:
+          - $values/helm/boutique-values.yaml
+    # 2. Mon dépôt, d'où viennent mes réglages
+    - repoURL: https://github.com/Stc05/Kube_Doctor.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: boutique
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
