@@ -217,3 +217,92 @@
 - Diagnostic : `terraform state list` (3 ressources seulement) puis `grep` sur main.tf
 - Le "1 changed" sur le cluster était une dérive : Azure remplit des réglages par défaut après la création
 - Leçon : toujours lire la dernière ligne du plan avant de taper yes
+
+## Jour 5 : sécurité, GitOps avec Argo CD et pipeline CI
+
+### Gitleaks : chercher des secrets
+- `brew install gitleaks` : installer l'outil
+- `gitleaks git -v .` : analyser tout l'historique du dépôt (résultat : 9 commits, no leaks found)
+
+### Trivy : failles et erreurs de configuration
+- `brew install trivy` : installer l'outil
+- `trivy image --severity HIGH,CRITICAL <image>` : failles connues (CVE) d'une image
+- Résultat cartservice v0.10.7 : 2 failles OpenSSL HIGH (corrigées dans une version plus récente) ; risque faible (code concerné probablement non utilisé, service non exposé)
+- `trivy config terraform/` : erreurs de configuration du Terraform (9 problèmes trouvés)
+- `trivy config terraform/ --show-suppressed` : voir aussi les problèmes ignorés
+
+### Tri des 9 problèmes du Terraform
+- Corrigé : AZU-0042 (RBAC du cluster, faux positif, écrit explicitement)
+- Corrigé : AZU-0041 (API du cluster restreinte à mon adresse IP avec authorized_ip_ranges)
+- Reporté (semaine sécurité) : AZU-0013 (réseau du Key Vault), AZU-0043 (network policies)
+- Assumé : AZU-0016 (purge du coffre, destroy quotidien), AZU-0040 (Azure Monitor, remplacé par Prometheus), AZU-0065 (cluster privé, compensé par la restriction IP), AZU-0066 (Azure Policy, Kyverno prévu), AZU-0067 (clés de chiffrement personnelles)
+- Les exceptions sont listées dans `.trivyignore`, avec leur justification (registre des risques acceptés)
+
+### Mon adresse IP
+- `curl -4 -s ifconfig.me; echo` : adresse IPv4 publique (le -4 est nécessaire, sinon on peut obtenir une IPv6 refusée par AKS)
+- La mettre dans terraform.tfvars : `authorized_ip = "x.x.x.x/32"`
+
+### Installer Argo CD
+- `helm repo add argo https://argoproj.github.io/argo-helm` : dépôt officiel (vérifier l'éditeur "argo", badge Official sur Artifact Hub)
+- `helm repo update` puis `helm search repo argo/argo-cd` : trouver la version
+- `helm install argocd argo/argo-cd --version 10.11.6 --namespace argocd --create-namespace` : installer
+- Variante sans repo add : `helm install argocd argo-cd --repo https://argoproj.github.io/argo-helm --version 10.11.6 --namespace argocd --create-namespace`
+- `kubectl get pods -n argocd` : 7 composants (server, repo-server, application-controller, redis, dex, applicationset, notifications)
+- `helm get notes argocd -n argocd` : réafficher les instructions d'après installation
+
+### Accéder à Argo CD
+- `kubectl get secret -n argocd argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo` : mot de passe initial (identifiant admin)
+- `kubectl port-forward -n argocd svc/argocd-server 8080:443` puis https://localhost:8080 (accepter l'avertissement : certificat auto-signé)
+- Ordre correct : se connecter, changer le mot de passe, le noter, puis seulement `kubectl delete secret -n argocd argocd-initial-admin-secret`
+- Mot de passe perdu : `kubectl patch secret -n argocd argocd-secret -p '{"data": {"admin.password": null, "admin.passwordMtime": null}}'` puis `kubectl rollout restart deployment -n argocd argocd-server`
+
+### L'Application Argo CD (argocd/boutique.yaml)
+- Quoi : le chart de Google (tag v0.10.7) + mes réglages (helm/boutique-values.yaml), avec deux sources et `ref: values`
+- Où : ce cluster, namespace boutique (CreateNamespace=true)
+- Comment : synchronisation automatique, prune et selfHeal
+- `git ls-remote --tags <dépôt> | grep v0.10` : trouver une étiquette (attention au tri alphabétique, utiliser `sort -V -k2`)
+- `kubectl apply -f argocd/boutique.yaml --dry-run=server` : vérifier sans créer
+- `kubectl apply -f argocd/boutique.yaml` : le seul geste manuel, une fois par cluster
+- `kubectl get applications -n argocd` : SYNC STATUS et HEALTH STATUS
+- `kubectl get application boutique -n argocd -o jsonpath='{.status.conditions}'; echo` : lire les erreurs
+- `kubectl annotate application boutique -n argocd argocd.argoproj.io/refresh=hard --overwrite` : forcer une relecture et vider le cache
+- `kubectl logs -n argocd deployment/argocd-repo-server --tail=30` : journal du composant qui lit les dépôts
+- `kubectl explain application.spec` et `kubectl api-resources | grep -i application` : retrouver la structure et l'apiVersion
+
+### Tests GitOps
+- Test 1 : modifier helm/boutique-values.yaml, git push, Argo CD applique tout seul (limite de cartservice passée à 300Mi)
+- Test 2 : `kubectl set resources deployment cartservice -n boutique --limits=memory=200Mi` : annulé en quelques secondes par selfHeal
+- Limite : `kubectl scale … --replicas=3` n'est pas annulé, car le chart ne déclare pas replicas ; le GitOps ne protège que ce qui est écrit dans Git
+- `helm template boutique <chart> -f helm/boutique-values.yaml > /dev/null && echo "YAML valide"` : tester les réglages avant de pousser
+
+### Pipeline GitHub Actions (.github/workflows/securite.yml)
+- Déclenché à chaque push sur main et à chaque pull request
+- Tâche 1 : Gitleaks sur tout l'historique (actions/checkout avec fetch-depth: 0)
+- Tâche 2 : Trivy config sur terraform/, avec .trivyignore et exit-code 1 (sinon la tâche reste verte même en cas de problème)
+- Versions figées des actions ; option plus sûre : figer par identifiant de commit
+- `git ls-remote --tags https://github.com/aquasecurity/trivy-action | sort -V -k2 | tail -3` : dernière version d'une action
+- Résultat : deux tâches vertes, artefact gitleaks-results.sarif (format standard des rapports de sécurité)
+- À faire : mettre à jour actions/checkout (avertissement Node.js 20) et figer runs-on: ubuntu-24.04
+
+### Session AKS (fin des jours 4 et 5)
+- `terraform apply` puis `az aks get-credentials --resource-group rg-kube-doctor --name aks-kube-doctor --overwrite-existing`
+- `helm install argocd …` (Argo CD doit être installé avant de lui donner l'Application)
+- `kubectl apply -f argocd/boutique.yaml` : le même fichier qu'en local
+- `kubectl get svc -n boutique frontend-external -w` : adresse publique de la boutique
+- `terraform destroy` puis `kubectl config use-context k3d-kube-doctor`
+
+### Incidents du jour
+- Dépôt privé : Argo CD ne pouvait pas le lire (failed to get git client) ; corrigé en rendant le dépôt public
+- Erreur de syntaxe YAML poussée dans Git : Argo CD a refusé de l'appliquer et gardé la dernière version valide ; diagnostic dans les conditions de l'Application, correction testée avec helm template
+- Le premier déploiement avait réussi grâce au cache : le refresh hard a révélé le problème
+- Mac à court de mémoire (pression orange, 12 Go pour Docker) : libérer en retirant le monitoring (`helm uninstall monitoring -n monitoring`)
+- Faux chart sur Artifact Hub (QuenchWorks) : Verified Publisher ne veut pas dire officiel ; chercher le badge Official
+- Adresse IPv6 refusée par AKS : utiliser `curl -4`
+
+### Notions du jour
+- GitOps : Git est la seule source de vérité ; Argo CD aligne le cluster sur Git
+- CI / CD : GitHub Actions contrôle le code, Argo CD déploie la configuration
+- Application : objet ajouté par Argo CD (CRD), qui répond à quoi, où, comment
+- Helm installe les outils de la plateforme (Argo CD) ; Argo CD déploie les applications
+- brew installe ce qui tourne sur mon Mac, Helm ce qui tourne dans le cluster, Terraform ce qui tourne dans Azure
+- Chaîne d'approvisionnement : vérifier l'éditeur de chaque chart, image et action, et figer les versions
