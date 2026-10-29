@@ -1,0 +1,12 @@
+# Exceptions acceptées, voir le tri du jour 5 dans NOTES.md
+
+# Reportés à la semaine sécurité
+AZU-0013  # Réseau du Key Vault non restreint
+AZU-0043  # Pas de network policy
+
+# Assumés
+AZU-0016  # Pas de protection contre la purge : destroy quotidien
+AZU-0040  # Pas d'Azure Monitor : monitoring par Prometheus et Grafana
+AZU-0065  # Cluster non privé : accès à l'API restreint par adresse IP
+AZU-0066  # Pas d'Azure Policy : Kyverno prévu
+AZU-0067  # Pas de clés de chiffrement personnelles : chiffrement Azure par défaut
