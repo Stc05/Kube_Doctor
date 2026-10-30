@@ -1,0 +1,22 @@
+# Réglages de kube-prometheus-stack pour Kube Doctor
+
+prometheus:
+  prometheusSpec:
+    # Garder 2 jours de métriques : suffisant, et économe en mémoire
+    retention: 2d
+    # Lire les règles d'alerte et les cibles de TOUS les namespaces,
+    # pas seulement celles créées par ce chart
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+# k3s regroupe ces composants dans un seul programme : Prometheus ne peut
+# pas les surveiller séparément, et déclencherait de fausses alertes
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
