@@ -1,0 +1,51 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: alertes-boutique
+  namespace: monitoring
+spec:
+  groups:
+    - name: boutique
+      rules:
+
+        - alert: ConteneurRedemarreEnBoucle
+          expr: increase(kube_pod_container_status_restarts_total{namespace="boutique"}[10m]) > 2
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.container }} redémarre en boucle"
+            description: "Le conteneur {{ $labels.container }} du pod {{ $labels.pod }} a redémarré plus de 2 fois en 10 minutes."
+
+        - alert: ConteneurTueParManqueDeMemoire
+          expr: |
+            kube_pod_container_status_last_terminated_reason{namespace="boutique", reason="OOMKilled"} == 1
+            and on(namespace, pod, container)
+            increase(kube_pod_container_status_restarts_total{namespace="boutique"}[10m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.container }} tué par manque de mémoire (OOMKilled)"
+            description: "Le conteneur {{ $labels.container }} du pod {{ $labels.pod }} a dépassé sa limite de mémoire et a été tué. Vérifier sa limite (resources.limits.memory) et sa consommation réelle."
+
+        - alert: MemoireProcheDeLaLimite
+          expr: |
+            container_memory_working_set_bytes{namespace="boutique", container!="", image!=""}
+            / on(namespace, pod, container)
+            kube_pod_container_resource_limits{namespace="boutique", resource="memory"}
+            > 0.9
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.container }} utilise plus de 90 % de sa limite mémoire"
+            description: "Le conteneur {{ $labels.container }} du pod {{ $labels.pod }} approche de sa limite de mémoire : risque d'OOMKilled."
+
+        - alert: PodNonPret
+          expr: kube_pod_status_ready{namespace="boutique", condition="false"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Le pod {{ $labels.pod }} n'est pas prêt"
+            description: "Le pod {{ $labels.pod }} n'est pas prêt depuis plus de 5 minutes : il ne reçoit pas de trafic."
