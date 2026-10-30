@@ -306,3 +306,71 @@
 - Helm installe les outils de la plateforme (Argo CD) ; Argo CD déploie les applications
 - brew installe ce qui tourne sur mon Mac, Helm ce qui tourne dans le cluster, Terraform ce qui tourne dans Azure
 - Chaîne d'approvisionnement : vérifier l'éditeur de chaque chart, image et action, et figer les versions
+
+## Jour 6 : alertes et tableaux de bord
+
+### Monitoring confié à Argo CD
+- `helm uninstall monitoring -n monitoring` : retirer l'installation manuelle (les CRD restent, Helm ne les supprime jamais)
+- helm/monitoring-values.yaml : rétention 2d ; `ruleSelectorNilUsesHelmValues: false` (et serviceMonitor, podMonitor) pour lire les règles de tous les namespaces ; kubeControllerManager, kubeScheduler, kubeProxy, kubeEtcd désactivés (regroupés dans k3s, sinon fausses alertes)
+- `helm template monitoring prometheus-community/kube-prometheus-stack --version 92.14.0 -f helm/monitoring-values.yaml > /dev/null && echo "YAML valide"` : vérifier les réglages
+- argocd/monitoring.yaml : source Helm (`chart:` au lieu de `path:`, version du chart en targetRevision), `releaseName: monitoring` pour garder les mêmes noms, `ServerSideApply=true` (CRD trop volumineuses sinon)
+- `kubectl top nodes` : mémoire des nœuds (les deux nœuds k3d partagent la même VM Docker)
+- `kubectl get svc kubernetes -n default` : l'API du cluster, joignable en interne à https://kubernetes.default.svc (règle : <service>.<namespace>.svc)
+
+### Règles d'alerte (k8s/alertes/boutique.yaml, type PrometheusRule)
+- ConteneurRedemarreEnBoucle (critical) : `increase(kube_pod_container_status_restarts_total{namespace="boutique"}[10m]) > 2`, for 1m
+- ConteneurTueParManqueDeMemoire (critical) : dernier arrêt OOMKilled et redémarrages récents
+- MemoireProcheDeLaLimite (warning) : mémoire / limite > 0.9 pendant 2m (alerte prédictive)
+- PodNonPret (warning) : pod non prêt depuis 5m
+- Une règle : expr (condition PromQL), for (durée minimale), labels.severity, annotations (message, {{ $labels.pod }} remplacé par la vraie valeur)
+- États : Inactive, Pending (condition vraie, durée non atteinte), Firing
+- argocd/alertes.yaml : Application qui applique tous les fichiers du dossier k8s/alertes
+- `kubectl get prometheusrules -n monitoring` : vérifier que la règle existe
+
+### Interfaces
+- Prometheus : `kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090` puis http://localhost:9090/alerts
+- Alertmanager : `kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-alertmanager 9093:9093` puis http://localhost:9093
+- Grafana : `kubectl get secret -n monitoring monitoring-grafana -o jsonpath="{.data.admin-password}" | base64 -d; echo` puis `kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80` (le mot de passe change à chaque réinstallation)
+- Prometheus affiche toutes les règles ; Alertmanager ne reçoit que les alertes Firing
+- Destinataire "null" : les alertes arrivent dans Alertmanager mais ne préviennent personne (à configurer plus tard, identifiants dans Key Vault)
+- Watchdog : alerte toujours déclenchée exprès, preuve que la chaîne d'alertes fonctionne
+
+### Fausses alertes et sourdines
+- KubeDaemonSetRolloutStuck et 2 x KubePodNotReady : une seule cause, Traefik occupe le port 80 sur k3d, les pods svclb-frontend-external restent en Pending (même cause que frontend-external <pending> et l'Application boutique en Progressing)
+- Tempête d'alertes : une cause, plusieurs alertes ; remonter à la cause commune (le rôle de l'agent IA)
+- Sourdine 1 : `namespace="kube-system"` et `pod=~"svclb-frontend-external.*"`, 7d, commentaire justifié
+- Sourdine 2 : `namespace="kube-system"` et `daemonset=~"svclb-frontend-external.*"`
+- Une bonne sourdine : précise (jamais un namespace entier), limitée dans le temps, justifiée ; vérifier avec Preview Alerts
+- Les conditions d'une sourdine s'additionnent (pas de "ou") : deux familles d'alertes = deux sourdines
+- Les sourdines agissent sur Alertmanager, pas sur Prometheus
+
+### Test de panne
+- Limite de cartservice à 128Mi dans Git : OOMKilled (code 137), 3 redémarrages en 8 minutes
+- ConteneurRedemarreEnBoucle et ConteneurTueParManqueDeMemoire en Firing ; MemoireProcheDeLaLimite reste en Pending (le conteneur meurt avant 2 minutes : limite de la règle)
+- Alertes du chart en plus : KubePodNotReady et CPUThrottlingHigh (le manque de mémoire fait tourner le ramasse-miettes, donc le CPU)
+- Retour à 300Mi dans Git : les alertes se résolvent
+- Cycle complet : panne, détection, diagnostic, correction dans Git, résolution confirmée
+
+### Tableau de bord Grafana (k8s/dashboards/boutique.yaml)
+- Panneau 1 : `max by (pod) (container_memory_working_set_bytes{namespace="boutique", container="server", pod=~"cartservice.*"}) / 1024 / 1024` et la limite (kube_pod_container_resource_limits), légende `Consommation {{pod}}`
+- Panneau 2 : `sum by (container) (increase(kube_pod_container_status_restarts_total{namespace="boutique"}[10m]))`
+- Panneau 3 : `sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="boutique", container!=""}[5m]))` (en cœurs)
+- Panneau 4 (Stat) : `count(ALERTS{alertstate="firing", namespace="boutique"}) or vector(0)`
+- `max by (pod)` : regrouper les séries (chaque redémarrage crée un nouveau label id)
+- Méthode : créer dans l'interface, exporter en JSON format Classic (pas V2 resource), emballer dans un ConfigMap
+- `kubectl create configmap dashboard-boutique -n monitoring --from-file=kube-doctor-boutique.json="<fichier>" --dry-run=client -o yaml > /tmp/boutique.yaml`
+- `kubectl label --local -f /tmp/boutique.yaml grafana_dashboard=1 -o yaml > k8s/dashboards/boutique.yaml` (jamais rediriger vers le fichier qu'on lit : il serait vidé avant la lecture)
+- `grep -n "grafana_dashboard" k8s/dashboards/boutique.yaml` : vérifier l'étiquette (metadata est à la fin du fichier, kubectl trie les champs)
+- `kubectl get configmap -n monitoring -l grafana_dashboard=1` et `--show-labels` : vérifier dans le cluster
+- argocd/dashboards.yaml : Application du dossier k8s/dashboards
+- Supprimer le tableau de bord manuel avant (même identifiant)
+
+### Incidents du jour
+- ConfigMap sans étiquette : Grafana l'ignore sans erreur ; les étiquettes relient les objets entre eux
+- Export Grafana au format v2 (apiVersion dashboard.grafana.app/v2) : non compris par le chargement par ConfigMap ; réexporter en Classic
+- L'export YAML de Grafana n'est pas un objet Kubernetes utilisable ici (type Dashboard inconnu du cluster)
+- Modification de boutique-values.yaml oubliée (non poussée) : toujours vérifier git status
+
+### État du cluster
+- 4 Applications : boutique, monitoring, alertes, dashboards
+- Tout est décrit dans Git, sauf Argo CD lui-même (installé avec Helm)
