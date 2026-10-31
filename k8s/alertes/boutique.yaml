@@ -49,3 +49,11 @@ spec:
           annotations:
             summary: "Le pod {{ $labels.pod }} n'est pas prêt"
             description: "Le pod {{ $labels.pod }} n'est pas prêt depuis plus de 5 minutes : il ne reçoit pas de trafic."
+        - alert: CopiesIndisponibles
+          expr: kube_deployment_status_replicas_unavailable{namespace="boutique"} > 0
+          for: 30s
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.deployment }} n'a pas toutes ses copies disponibles"
+            description: "Le Deployment {{ $labels.deployment }} a {{ $value }} copie(s) indisponible(s) : le service peut être dégradé ou coupé."
