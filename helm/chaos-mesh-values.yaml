@@ -1,0 +1,15 @@
+# Réglages de Chaos Mesh pour Kube Doctor (cluster k3s)
+
+chaosDaemon:
+  # k3s utilise containerd, mais range son socket à un emplacement différent
+  runtime: containerd
+  socketPath: /run/k3s/containerd/containerd.sock
+
+controllerManager:
+  # Une seule copie du contrôleur au lieu de 3 : suffisant en local, économe en mémoire
+  replicaCount: 1
+
+dashboard:
+  # Interface accessible uniquement par port-forward, sans jeton d'authentification.
+  # Écart assumé en local, à réactiver sur un cluster partagé ou exposé.
+  securityMode: false

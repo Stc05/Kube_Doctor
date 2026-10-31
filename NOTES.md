@@ -374,3 +374,63 @@
 ### État du cluster
 - 4 Applications : boutique, monitoring, alertes, dashboards
 - Tout est décrit dans Git, sauf Argo CD lui-même (installé avec Helm)
+
+## Jour 7 : tests de charge et montée en charge automatique
+
+### Prérequis du HPA
+- `kubectl top pods -n boutique` : le metrics-server fonctionne (installé d'office avec k3s)
+- `kubectl get deployment frontend -n boutique -o jsonpath='{.spec.template.spec.containers[0].resources}'; echo` : le frontend réserve 100m de CPU (limite 200m)
+- Le HPA raisonne en pourcentage de la réservation (requests) : sans réservation, pas de calcul possible
+- Aucun champ replicas dans le chart pour le frontend : le HPA peut changer le nombre de copies sans qu'Argo CD le contredise
+
+### Unités
+- CPU en millicœurs : 1000m = 1 cœur, 100m = 0,1 cœur
+- Mémoire en Mi (mébioctets)
+- Plafond de mémoire dépassé : le conteneur est tué (OOMKilled)
+- Plafond de CPU atteint : le conteneur est ralenti (throttled), pas tué
+
+### Le HPA (k8s/autoscaling/frontend-hpa.yaml)
+- Type HorizontalPodAutoscaler, apiVersion autoscaling/v2 (intégré à Kubernetes)
+- scaleTargetRef : le Deployment frontend
+- minReplicas 1, maxReplicas 4 (le maximum protège le cluster et le quota)
+- Cible : 50 % de CPU moyen par rapport à la réservation
+- behavior.scaleDown.stabilizationWindowSeconds: 60 (5 minutes par défaut) : attendre avant de retirer des copies
+- Par défaut, la montée est immédiate (pas de délai) ; la descente est prudente
+- argocd/autoscaling.yaml : Application du dossier k8s/autoscaling, destination namespace boutique
+- `kubectl get hpa -n boutique` : TARGETS (utilisation / cible) et REPLICAS ; `<unknown>` pendant la première minute
+- `kubectl get hpa -n boutique -w` : suivre en direct
+- `kubectl describe hpa frontend -n boutique` : Behavior, Conditions et historique des décisions dans Events
+- ScalingLimited à True : le maximum est atteint (relever le maximum ou chercher un problème)
+
+### Test de charge avec k6
+- `brew install k6` : outil en ligne de commande, scénario écrit en JavaScript
+- tests/charge/boutique.js : montée à 20 visiteurs en 1 min, palier de 3 min, descente en 1 min
+- thresholds : p(95) < 1000 ms et moins de 1 % d'erreurs
+- Chaque visiteur : page d'accueil, page produit au hasard, vérification du code 200, pause d'une seconde
+- L'adresse vient de la variable BASE_URL (`__ENV.BASE_URL`), avec une valeur par défaut
+- `kubectl port-forward -n boutique svc/frontend 8081:80` : tunnel vers la boutique
+- `k6 run -e BASE_URL=http://localhost:8081 tests/charge/boutique.js` : lancer le test
+- Sur AKS : même scénario avec `-e BASE_URL=http://<adresse publique>`
+- Limite en local : le tunnel port-forward peut devenir le goulot d'étranglement
+
+### Résultats du test
+- 8 440 requêtes en 5 minutes (28 par seconde), 0 % d'erreurs, 100 % de checks réussis
+- Médiane 21 ms, moyenne 73 ms, p95 277 ms, max 1,09 s : quelques requêtes lentes tirent la moyenne vers le haut ; on regarde les centiles, pas la moyenne
+- HPA : 1 → 2 → 3 copies pendant la charge, puis 3 → 2 → 1 après (jamais 4 : 3 suffisaient)
+- Les requêtes lentes : pendant la montée, avant que les nouvelles copies soient prêtes (délai de réaction du HPA)
+- Avertissement FailedGetScale Unauthorized : au redémarrage du cluster k3d, sans gravité
+
+### Tableau de bord : panneau des copies
+- `kube_horizontalpodautoscaler_status_desired_replicas{namespace="boutique", horizontalpodautoscaler="frontend"}` : copies voulues par le HPA
+- `kube_deployment_status_replicas_available{namespace="boutique", deployment="frontend"}` : copies prêtes
+- L'écart entre les deux courbes : le délai de démarrage des nouvelles copies
+- Tableau de bord géré par Git : pas de Save dans Grafana ; Export as JSON (Classic), régénérer le ConfigMap, git push
+- `ls -t ~/Downloads/*.json | head -1` : le fichier téléchargé le plus récent
+- `head -c 200 <fichier>` : vérifier le format (ne pas commencer par "apiVersion")
+
+### Reste à faire
+- Refaire le test de charge sur AKS, avec l'adresse publique (sans le goulot du tunnel)
+- Mettre en place App of Apps (une seule Application à appliquer sur un nouveau cluster)
+
+### État du cluster
+- 5 Applications : boutique, monitoring, alertes, dashboards, autoscaling
