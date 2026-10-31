@@ -1,0 +1,17 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: memoire-cartservice
+  namespace: boutique
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - boutique
+    labelSelectors:
+      app: cartservice
+  stressors:
+    memory:
+      workers: 1
+      size: '150MB'
+  duration: '5m'

@@ -1,0 +1,45 @@
+# La sonde : ouvrir la page d'accueil de la boutique toutes les 30 secondes
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: sonde-boutique
+  namespace: monitoring
+spec:
+  jobName: sonde-boutique
+  interval: 30s
+  module: http_2xx
+  prober:
+    url: blackbox-prometheus-blackbox-exporter.monitoring.svc:9115
+  targets:
+    staticConfig:
+      static:
+        - http://frontend.boutique.svc/
+---
+# Les alertes sur ce que vivent les clients
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: alertes-sonde-boutique
+  namespace: monitoring
+spec:
+  groups:
+    - name: experience-client
+      rules:
+
+        - alert: PageAccueilInaccessible
+          expr: probe_success{job="sonde-boutique"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "La page d'accueil de la boutique est inaccessible"
+            description: "La sonde n'obtient plus de réponse correcte de {{ $labels.instance }} depuis plus d'une minute."
+
+        - alert: PageAccueilLente
+          expr: probe_duration_seconds{job="sonde-boutique"} > 1
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "La page d'accueil de la boutique est lente"
+            description: "La page {{ $labels.instance }} met {{ $value | humanizeDuration }} à répondre depuis plus d'une minute (seuil : 1 seconde)."
